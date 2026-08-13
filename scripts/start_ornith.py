@@ -19,7 +19,7 @@ try:
     # bat：b8600 + -cmoe（专家 CPU，non-expert/SSM GPU）——GTX1060 最优配置
     bat = ('@echo off\r\ncd /d D:\\llama_old\\bin\r\n'
            'llama-server.exe -m D:\\models\\ornith-1.0-35b-Q4_K_M.gguf -ngl 999 -cmoe --no-mmap '
-           '-c 196608 -kvo -ctk q8_0 -ctv q8_0 -fit off --jinja --host 0.0.0.0 --port 8080 > D:\\llama_old\\server.log 2>&1\r\n')
+           '-c 196608 -kvo -ctk q8_0 -ctv q8_0 -fa on -fit off --jinja --host 0.0.0.0 --port 8080 > D:\\llama_old\\server.log 2>&1\r\n')
     sftp = ssh.open_sftp()
     with sftp.open('D:/llama_old/start_ornith.bat', 'w') as f:
         f.write(bat)
