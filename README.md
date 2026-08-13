@@ -135,10 +135,45 @@ qwen35moe GGUF 强制全部 40 层跑 CPU**，GPU 完全闲置（`-lv 6` 日志�
 
 ---
 
+## 接入与工作流：NAS 前端调用本地模型
+
+laptop 的 llama-server 只提供 OpenAI 兼容端点（`/v1/chat/completions`），而 Claude CLI
+走 Anthropic 格式（`/v1/messages`）。`claude-web/` 内是 NAS 值守前端（9025 端口）及其
+经 litellm 的接入配置，构成完整链路：
+
+```
+前端(9025) → Claude CLI --model openai/ornith-1.0-35b-Q4_K_M.gguf
+           → litellm(:4025 /v1/messages)
+           → laptop Ornith(:8080 /v1/chat/completions)
+```
+
+- `claude-web/claude_web_server.py` + `index.html` — 9025 前端（SSE 流式、Provider 多后端）
+- `claude-web/providers.json` — Provider 配置表（deepseek 云端 / ornith 本地）
+- `claude-web/configs/litellm.service` — litellm 协议转换代理 systemd unit
+
+### litellm 代理部署（NAS，一次性）
+
+```bash
+python3 -m venv /vol1/1000/bots/litellm-venv
+/vol1/1000/bots/litellm-venv/bin/pip install "litellm[proxy]"
+/vol1/1000/bots/litellm-venv/bin/pip install "fastapi<0.116"   # 兼容 litellm 1.96
+```
+
+安装 `claude-web/configs/litellm.service` 后 `systemctl enable --now litellm`。
+
+### 接入要点
+
+- **Ornith 是推理模型**：回复前长思考（`reasoning_content`），`max_tokens` 需足够大才有正文（实测 60 全花思考、200 才有正文）
+- `~/.claude/settings.json` 的 `ANTHROPIC_*` env 会覆盖 providers.json 注入的进程 env，接入本地模型前需移除，让 providers.json 完全控制
+- 前端刷新后配置下拉可选「配置2 - Ornith本地」，即 laptop 模型
+
+---
+
 ## 目录结构
 
 - `scripts/` — 全部调试脚本（SSH 连接、下载、部署、测速、诊断、一键启动）
 - `scripts/start_ornith.py` — 一键启动（推荐入口）
+- `claude-web/` — NAS 9025 前端接入（claude_web_server.py / index.html / providers.json / litellm.service）
 - `docs/调试记录.md` — 完整部署决策与结论归档
 
 ---
