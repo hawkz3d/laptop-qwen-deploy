@@ -31,7 +31,7 @@ Q4_K_M 是速度与质量的平衡点。Q3 量化更小的 13GB IQ3_XXS 能更�
 llama-server -m ornith-1.0-35b-Q4_K_M.gguf \
   -ngl 999 -cmoe --no-mmap \
   -c 196608 -kvo -ctk q8_0 -ctv q8_0 \
-  -fit off --jinja --host 0.0.0.0 --port 8080
+  -fa on -fit off --jinja --host 0.0.0.0 --port 8080
 ```
 
 | 指标 | 值 |
@@ -82,6 +82,7 @@ qwen35moe GGUF 强制全部 40 层跑 CPU**，GPU 完全闲置（`-lv 6` 日志�
 | `--no-mmap` | 模型一次性预载内存，推理时不触发磁盘缺页中断 |
 | `-c 196608` | 192K 上下文 |
 | `-kvo` + `-ctk q8_0 -ctv q8_0` | KV cache 量化后放 GPU，192K KV 仅 2.04GB，不占 CPU 内存带宽 |
+| `-fa on` | Flash Attention 显式开启。**V cache 量化（`-ctv q8_0`）的硬依赖**——`-fa off` 直接启动失败；`auto` 也会自动启用，显式写上更明确 |
 | `-fit off` | **必须**。否则 fit 逻辑会静默把 `-c 196608` 压回 131072 |
 | `--jinja` | 启用 chat template |
 
@@ -124,10 +125,11 @@ qwen35moe GGUF 强制全部 40 层跑 CPU**，GPU 完全闲置（`-lv 6` 日志�
 
 | 尝试 | 结果 |
 |------|------|
-| 杀掉多余进程 | 速度不变（不是进程竞争） |
+| 杀掉多余进程（MAA/MuMu） | 速度不变（不是进程竞争） |
 | `--no-kv-offload`（KV 放 CPU） | 11.25 t/s，大降 |
 | `-ncmoe` / `-ot` 部分专家 GPU | 15GB pinned 卡死 / override 无效 |
 | ngram 投机解码 | GDN 架构不支持 partial sequence removal |
+| `-fa off`（关 Flash Attention） | 启动失败：`V cache quantization requires flash_attn`，与 `-ctv q8_0` 冲突 |
 | 主线 b10301 | 无法 offload qwen35moe |
 | Turbo Boost 软件开启 | BIOS 锁定，MaxClockSpeed 2208，需进 BIOS（预期 <1 t/s，带宽已饱和） |
 
