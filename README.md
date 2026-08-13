@@ -125,7 +125,7 @@ qwen35moe GGUF 强制全部 40 层跑 CPU**，GPU 完全闲置（`-lv 6` 日志�
 
 | 尝试 | 结果 |
 |------|------|
-| 杀掉多余进程（MAA/MuMu） | 速度不变（不是进程竞争） |
+| 杀掉多余进程 | 速度不变（不是进程竞争） |
 | `--no-kv-offload`（KV 放 CPU） | 11.25 t/s，大降 |
 | `-ncmoe` / `-ot` 部分专家 GPU | 15GB pinned 卡死 / override 无效 |
 | ngram 投机解码 | GDN 架构不支持 partial sequence removal |
