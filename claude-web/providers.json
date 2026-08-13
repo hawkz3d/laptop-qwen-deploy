@@ -1,0 +1,39 @@
+{
+  "providers": {
+    "deepseek": {
+      "label": "配置1 - DeepSeek",
+      "base_url": "https://api.deepseek.com/anthropic",
+      "auth_token": "sk-<REDACTED>",
+      "default_model": "deepseek-v4-pro",
+      "effort": "max",
+      "toolsearch": false,
+      "teammate": true,
+      "models": [
+        "deepseek-v4-pro",
+        "deepseek-v4-flash"
+      ],
+      "mapping": {
+        "opus": "deepseek-v4-pro",
+        "sonnet": "deepseek-v4-pro",
+        "haiku": "deepseek-v4-flash"
+      }
+    },
+    "ornith": {
+      "label": "配置2 - Ornith本地",
+      "base_url": "http://127.0.0.1:4025",
+      "auth_token": "sk-local-ornith",
+      "default_model": "openai/ornith-1.0-35b-Q4_K_M.gguf",
+      "effort": "medium",
+      "toolsearch": false,
+      "teammate": false,
+      "models": [
+        "openai/ornith-1.0-35b-Q4_K_M.gguf"
+      ],
+      "mapping": {
+        "opus": "openai/ornith-1.0-35b-Q4_K_M.gguf",
+        "sonnet": "openai/ornith-1.0-35b-Q4_K_M.gguf",
+        "haiku": "openai/ornith-1.0-35b-Q4_K_M.gguf"
+      }
+    }
+  }
+}
