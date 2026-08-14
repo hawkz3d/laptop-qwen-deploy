@@ -1,4 +1,4 @@
-# Ornith-1.0-35B 本地部署：GTX1060 实战
+# Ornith-1.0-35B 在GTX1060 6GB显存上的物理极限本地部署：
 
 在 **Dell G3579（i7-8750H 6C12T + GTX1060 Max-Q 6GB + 32GB DDR4-2666）** 上本地运行
 **Ornith-1.0-35B（qwen35moe 架构，MoE 35B 总参 / 3B 激活）Q4_K_M 量化**，
