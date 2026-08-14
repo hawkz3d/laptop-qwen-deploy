@@ -21,7 +21,7 @@
 | 上下文 | 262K（模型上限） |
 
 **为什么是这个模型**：MoE 35B 总参 / 3B 激活，GTX1060 + 32GB 下能完整放下并跑出实用速度；
-Q4_K_M 是速度与质量的平衡点。Q3 量化更小的 13GB IQ3_XXS 能更快，但质量略降，未采用。
+Q4_K_M 是速度与质量的平衡点。Q3 量化更小的 13GB IQ3_XXS 能更快，但质量略降。
 
 ---
 
@@ -180,10 +180,10 @@ python3 -m venv /vol1/1000/bots/litellm-venv
 
 ## 进阶方向
 
-- **换更小量化提速**（唯一路径，用户决策停在 Q4 18 t/s 未采用）：
+- **换更小量化提速**：
   - Q3_K_M（~16.5GB）→ 预期 ~20-21 t/s
   - IQ3_XXS（13GB）→ 预期 ~24-25 t/s，还省 6-7GB 内存给 KV
 - 更强硬件（RTX 系列 / DDR5 / PCIe Gen4）直接线性获益，该配置思路不变
 - 在相同 GTX1060 上测试 D-Flash 草稿器配合 27B dense 模型，探索突破 25 t/s
-
-- 上 20 t/s 探索定论（2026-08-14）：FA 对照 / 线程 / `--mlock` 均无提升（DDR4 带宽天花板 18 t/s 已达 90%+）；投机解码（MTP / LLM draft / ngram）因 qwen35moe 架构不支持 speculative decoding 而不可行（b8600 无 `--mtp`，唯一同词表 draft Ornith-9B 实测被禁用）。仅剩换更小量化（Q3/IQ3_XXS）或换硬件
+- 上 20 t/s 探索定论（2026-08-14）：FA 对照 / 线程 / `--mlock` 均无提升（DDR4 带宽天花板 18 t/s 已达 90%+）；
+- 投机解码（MTP / LLM draft / ngram）因 qwen35moe 架构不支持 speculative decoding 而不可行（b8600 无 `--mtp`，唯一同词表 draft Ornith-9B 实测被禁用）。
