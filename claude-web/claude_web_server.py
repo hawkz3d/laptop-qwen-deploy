@@ -34,10 +34,16 @@ PROVIDERS_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "provi
 SYSTEM_PROMPT = os.environ.get(
     "CLAUDE_SYSTEM_PROMPT",
     "使用中文进行所有内部推理和思考。所有 thinking 过程必须用中文。"
+    "这是无界面的自动化会话:不要向用户提出任何问题或请求 y/n 确认,"
+    "遇到选择时自行做出最合理的决定并直接继续执行。"
 )
 
 _session_locks = {}
 _locks_lock = threading.Lock()
+
+# 进行中的 CLI 进程注册表 (session_id -> Popen), 供 /api/chat/abort 终止
+_running = {}
+_running_lock = threading.Lock()
 
 
 def get_lock(sid):
@@ -102,6 +108,10 @@ def provider_env(config_key):
         "ANTHROPIC_DEFAULT_SONNET_MODEL": mapping.get('sonnet', default),
         "ANTHROPIC_DEFAULT_HAIKU_MODEL": mapping.get('haiku', default),
     }
+    # extra_env: provider 自定义附加环境变量（如 DISABLE_INTERLEAVED_THINKING）
+    for _k, _v in (p.get('extra_env') or {}).items():
+        if _v is not None:
+            env[str(_k)] = str(_v)
     return {k: v for k, v in env.items() if v}
 
 
@@ -136,6 +146,8 @@ def generate(message, session_id, config_key):
             args += ["--effort", effort]
         if provider and 'teammate' in provider and not provider.get('teammate'):
             args += ["--disallowedTools", "Agent"]
+        # 无头模式无交互 UI: 禁用提问工具, 杜绝 y/n 卡死 (配合系统提示词自主决策)
+        args += ["--disallowedTools", "AskUserQuestion"]
         try:
             proc = subprocess.Popen(
                 args, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
@@ -144,54 +156,64 @@ def generate(message, session_id, config_key):
         except Exception as e:
             yield sse("error", {"message": f"启动 Claude CLI 失败: {e}"})
             return
-
-        thinking = reply = model_used = ""
-        duration_ms = 0
-        deadline = time.time() + TIMEOUT
-        while True:
-            if time.time() > deadline:
-                proc.kill()
-                yield sse("error", {"message": f"请求超时 ({TIMEOUT}s)"})
-                return
-            r, _, _ = select.select([proc.stdout], [], [], 1.0)
-            if not r:
-                if proc.poll() is not None:
+        with _running_lock:
+            _running[session_id] = proc
+        try:
+            thinking = reply = model_used = ""
+            duration_ms = 0
+            deadline = time.time() + TIMEOUT
+            while True:
+                if time.time() > deadline:
+                    proc.kill()
+                    yield sse("error", {"message": f"请求超时 ({TIMEOUT}s)"})
+                    return
+                r, _, _ = select.select([proc.stdout], [], [], 1.0)
+                if not r:
+                    if proc.poll() is not None:
+                        break
+                    continue
+                line = proc.stdout.readline()
+                if not line:
                     break
-                continue
-            line = proc.stdout.readline()
-            if not line:
-                break
-            line = line.strip()
-            if not line:
-                continue
-            try:
-                obj = json.loads(line)
-            except Exception:
-                continue
-            t = obj.get("type", "")
-            if t == "assistant":
-                msg = obj.get("message", {})
-                if msg.get("model"):
-                    model_used = msg["model"]
-                for c in msg.get("content", []):
-                    ct = c.get("type", "")
-                    if ct == "thinking":
-                        thinking += c.get("thinking", "")
-                        yield sse("thinking", {"delta": c.get("thinking", "")})
-                    elif ct == "text":
-                        reply += c.get("text", "")
-                        yield sse("text", {"delta": c.get("text", "")})
-                    elif ct == "tool_use":
-                        yield sse("tool", {"name": c.get("name", ""), "input": c.get("input", {})})
-            elif t == "result":
-                duration_ms = obj.get("duration_ms", 0)
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    obj = json.loads(line)
+                except Exception:
+                    continue
+                t = obj.get("type", "")
+                if t == "assistant":
+                    msg = obj.get("message", {})
+                    if msg.get("model"):
+                        model_used = msg["model"]
+                    for c in msg.get("content", []):
+                        ct = c.get("type", "")
+                        if ct == "thinking":
+                            thinking += c.get("thinking", "")
+                            yield sse("thinking", {"delta": c.get("thinking", "")})
+                        elif ct == "text":
+                            reply += c.get("text", "")
+                            yield sse("text", {"delta": c.get("text", "")})
+                        elif ct == "tool_use":
+                            yield sse("tool", {"name": c.get("name", ""), "input": c.get("input", {})})
+                elif t == "result":
+                    duration_ms = obj.get("duration_ms", 0)
 
-        proc.wait()
-        if proc.returncode != 0:
-            err = proc.stderr.read()
-            yield sse("error", {"message": (err or f"Claude CLI 退出码 {proc.returncode}")[-500:]})
-            return
-        yield sse("done", {"session_id": session_id, "duration_ms": duration_ms, "model": model_used})
+            proc.wait()
+            if proc.returncode != 0:
+                if proc.returncode < 0:
+                    # 被信号终止 = 用户主动停止: 半截内容按正常完成收尾
+                    yield sse("done", {"session_id": session_id, "duration_ms": duration_ms,
+                                       "model": model_used, "stopped": True})
+                    return
+                err = proc.stderr.read()
+                yield sse("error", {"message": (err or f"Claude CLI 退出码 {proc.returncode}")[-500:]})
+                return
+            yield sse("done", {"session_id": session_id, "duration_ms": duration_ms, "model": model_used})
+        finally:
+            with _running_lock:
+                _running.pop(session_id, None)
 
 
 @app.route('/api/chat/stream', methods=['POST'])
@@ -206,6 +228,22 @@ def chat_stream():
         generate(message, session_id, config_key),
         mimetype='text/event-stream',
         headers={'Cache-Control': 'no-cache', 'X-Accel-Buffering': 'no'})
+
+
+@app.route('/api/chat/abort', methods=['POST'])
+def chat_abort():
+    """终止指定会话进行中的 CLI 进程 (停止按钮)"""
+    data = request.get_json(force=True, silent=True) or {}
+    sid = data.get('session_id') or ''
+    with _running_lock:
+        proc = _running.get(sid)
+    if not proc:
+        return jsonify({"ok": False, "error": "该会话没有进行中的请求"})
+    try:
+        proc.terminate()
+        return jsonify({"ok": True})
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
 
 
 @app.route('/api/configs')
