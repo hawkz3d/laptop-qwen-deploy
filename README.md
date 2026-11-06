@@ -1,186 +1,101 @@
-# Ornith-1.0-35B 在GTX1060 6GB显存上的物理极限本地部署：
+# AI 基础设施实践：大模型推理服务部署与优化
 
-在老旧GTX 1060 Max-Q 6GB显存 pascal架构上本地部署及稳定运行
-Ornith-1.0-35B（qwen35moe 架构，MoE 35B 总参 / 3B 激活）Q4_K_M 量化模型，
-达到 **192K 上下文 + 18 t/s** 的完整部署记录与调试脚本，并搭建工作流。
+**AI Infra · LLM Inference · Model Serving · GPU 显存优化 · 部署自动化**
 
----
+在 **6GB 显存、32GB 内存的消费级硬件**上，完成 35B MoE 量化模型的本地部署、CPU/GPU 资源配置、推理性能调优和 API 服务化，并打通 Web 客户端调用链路。
 
-## 硬件与模型
+本项目展示 AI Infrastructure（AI 基础设施）方向的工程实践：**让模型在有限资源下运行，将其封装成应用能够调用的服务，并用实验和日志定位性能与兼容性问题。** 主要覆盖单机推理部署与服务接入。
 
-| 项 | 值 |
-|----|----|
-| CPU | i7-8750H（6C12T，Turbo Boost 被 BIOS 锁定在 2.2GHz） |
-| GPU | GTX 1060 Max-Q 6GB（cc 6.1，CUDA 12.4） |
-| 内存 | 32GB DDR4-2666 双通道 |
-| 模型 | `ornith-1.0-35b-Q4_K_M.gguf`，19.71GB，Q4_K 量化（file_type 15） |
-| 架构 | qwen35moe：40 层 hybrid sliding + full attention，256 routed + 1 shared expert，8 active |
-| 上下文 | 262K（模型上限） |
+## 项目成果
 
-**为什么是这个模型**：MoE 35B 总参 / 3B 激活，GTX1060 + 32GB 下能完整放下并跑出实用速度；
-Q4_K_M 是速度与质量的平衡点。Q3 量化更小的 13GB IQ3_XXS 能更快，但质量略降。
+| 交付内容 | 实现结果 |
+| --- | --- |
+| 大模型本地部署 | 在 GTX 1060 Max-Q 6GB + 32GB 系统内存环境运行 Ornith-1.0-35B Q4_K_M；模型权重由系统内存与显存共同承载 |
+| 推理性能优化 | 历史实验中，纯 CPU 配置约 10.3 token/s，切换到兼容运行时并启用 GPU 卸载后约 17.8 token/s；后续配置约 18 token/s |
+| 显存与上下文配置 | 使用 GPU KV Cache 量化，配置 192K 上下文容量；历史记录中显存占用约 4.5–4.9GB |
+| 模型服务化 | 提供 OpenAI 兼容推理 API，通过 LiteLLM 协议转换接入 Claude CLI 与 Web 客户端 |
+| 部署自动化 | 编写 Python 远程启动、日志检查、服务就绪检查和资源诊断脚本 |
 
----
+> **实验口径：** 上述数据来自历史部署与调试记录。约 18 token/s 为当时短提示请求的生成阶段速度；192K 为配置的上下文容量，二者不代表满 192K 输入下的吞吐结果。CPU 与 GPU 数据涉及运行时版本变化，用于展示部署配置对比；未开展统一条件下的并发压测或 SLA 验证。
 
-## 最终最优配置
+## 核心能力与实现
 
-```
-llama-server -m ornith-1.0-35b-Q4_K_M.gguf \
-  -ngl 999 -cmoe --no-mmap \
-  -c 196608 -kvo -ctk q8_0 -ctv q8_0 \
-  -fa on -fit off --jinja --host 0.0.0.0 --port 8080
-```
+### 1. 模型部署与运行时兼容性排查
 
-| 指标 | 值 |
-|------|-----|
-| 生成速度 | **18 t/s**（Q4 在此内存上的物理极限） |
-| 上下文 | 192K（KV q8_0 量化，2.04GB 在 GPU） |
-| 显存占用 | 4.9GB / 6GB |
-| 系统内存余量 | ~7GB |
-| 接口 | OpenAI 兼容 `http://<LAPTOP_IP>:8080/v1` |
+围绕模型格式、推理引擎、CUDA 运行库和 GPU 架构完成环境适配。针对服务可以启动、但模型计算仍落在 CPU 的问题，通过设备识别与层分配日志确认 GPU 实际使用情况，并在历史实验中选择可正常卸载该模型的 llama.cpp b8600 配置。
 
-**进程优先级 High（+9%）**：启动后把 `llama-server` 进程优先级设为 High。
-**High Performance 电源计划**：prefill 从 9.67 → 28.33 t/s。
+**体现能力：** 模型部署、依赖与版本管理、运行日志分析、软硬件兼容性排查。
 
----
+### 2. CPU/GPU 混合推理与显存预算
 
-## 一键启动
+面对模型权重大于显存的限制，将 MoE 专家层保留在 CPU，将可卸载的非专家层放到 GPU；结合模型预载、GPU KV Cache 量化与 Flash Attention，平衡系统内存、显存和推理速度。
 
-`scripts/start_ornith.py` — SSH 连到目标机 → 杀旧进程 → 写入并拉起 `start_ornith.bat`
-（固化上述 192K 配置）→ 设 High 优先级 → 轮询 `server.log` 等待 `model loaded` → 健康检查 `/health`。
+这里的 CPU/GPU 混合执行由 llama.cpp 提供，项目工作集中在部署策略选择、参数配置与实验验证。
 
----
+**体现能力：** 资源受限条件下的推理配置、模型与 KV Cache 内存开销分析、性能与容量权衡。
 
-## 部署前提：为什么必须用老版 llama.cpp b8600
+### 3. 推理性能分析与配置对照实验
 
-**主线 b10301（2026-03 起加入 fused metadata 要求，PR #19139）对缺少 fused metadata 的
-qwen35moe GGUF 强制全部 40 层跑 CPU**，GPU 完全闲置（`-lv 6` 日志铁证 `assigned to device CPU`）。
+区分提示处理（prefill）与逐 token 生成（decode）阶段，读取运行时 timing、GPU 显存与系统内存信息，对比 CPU/GPU 执行、KV Cache 放置、线程数、电源计划和进程优先级等因素。
 
-**老版 b8600（2026-02，fused 要求引入之前）能正常 offload qwen35moe**。
-部署到 `D:\llama_old\bin`（从新版目录复制 cudart/cublas DLL 后 CUDA 正常识别 GTX1060）。
-**纯 CPU 10 t/s → GPU offload 17.8 t/s**。
+保留无明显收益及不兼容方案的结果，避免把所有参数变化都视作有效优化。例如，历史实验中的线程数调整和内存锁定没有带来稳定的生成速度提升；所测版本与模型组合下，投机解码未取得收益。
 
-### 环境布置（一次性）
+**体现能力：** 性能测量、瓶颈定位、对照实验与结果解释。
 
-1. 下载 llama.cpp b8600 CUDA 版 + **cudart 包**（CUDA 主包不含 cuBLAS/cudart DLL，
-   缺它 `--list-devices` 显示 `(none)`、后端只加载 CPU）
-2. 验证：`llama-server --list-devices` 应显示 `CUDA0: GTX 1060 Max-Q (6143 MiB, cc 6.1)`
-3. 下载模型：`hf-mirror.com/deepreinforce-ai/Ornith-1.0-35B-GGUF/resolve/main/ornith-1.0-35b-Q4_K_M.gguf`（19.71GB）
-4. 驱动 566.36 / CUDA 12.7，兼容 cu12.4 build
+### 4. 模型服务化与应用接入
 
----
+将本地推理节点以 OpenAI 兼容 API 对外提供服务，通过 LiteLLM 转换 OpenAI 与 Anthropic 请求协议，连接 Claude CLI 和 Flask Web 客户端。客户端支持 SSE 流式输出、后端配置切换、会话管理和停止生成。
 
-## 关键参数解读
+**体现能力：** Model Serving、API 集成、协议适配、流式响应与跨主机服务接入。
 
-| 参数 | 作用 |
-|------|------|
-| `-ngl 999` | 尽可能把所有层 offload 到 GPU |
-| `-cmoe` | **MoE 专家层固定 CPU**。6GB 显存放不下 15GB 专家（硬上限），只把 non-expert / SSM 层放 GPU |
-| `--no-mmap` | 模型一次性预载内存，推理时不触发磁盘缺页中断 |
-| `-c 196608` | 192K 上下文 |
-| `-kvo` + `-ctk q8_0 -ctv q8_0` | KV cache 量化后放 GPU，192K KV 仅 2.04GB，不占 CPU 内存带宽 |
-| `-fa on` | Flash Attention 显式开启。**V cache 量化（`-ctv q8_0`）的硬依赖**——`-fa off` 直接启动失败；`auto` 也会自动启用，显式写上更明确 |
-| `-fit off` | **必须**。否则 fit 逻辑会静默把 `-c 196608` 压回 131072 |
-| `--jinja` | 启用 chat template |
+### 5. 部署自动化与基础运行维护
 
----
+使用 Python 和 SSH 完成远程启动流程，包含旧进程处理、启动配置写入、进程优先级设置、加载日志轮询和 `/health` 就绪检查；配套脚本检查 CUDA 设备、显存、系统内存与服务 timing。协议转换服务提供 systemd 配置示例。
 
-## 速度优化历程
+**体现能力：** 运维脚本开发、启动流程自动化、服务就绪判断与故障诊断。
 
-**阶段一（主线 b10301，早期路径）** —— 3 → 17 t/s：
+## 服务架构
 
-| 步骤 | 变更 | 效果 |
-|------|------|------|
-| 基线 | 分层对半切（前 20 层 GPU） | 3 t/s（PCIe 传输瓶颈） |
-| `--no-moe-offload` | 专家钉 CPU，只留 non-expert 在 GPU | 10 t/s（+230%） |
-| `--no-mmap` | 模型预载内存 | 13.5 t/s（+35%） |
-| 调整 `-ngl` | 更多层拉回 GPU | 17 t/s |
-| TurboQuant KV | Key 4bit / Value 3bit 量化 | 17 t/s @ 256K |
-| `--mlock` | 锁定内存防换页（需容器 IPC_LOCK） | 长跑不掉速 |
-
-> 此阶段为 b10301 + TurboQuant 路线的探索结论。qwen35moe 最终走 b8600 + `-cmoe` 定稿
-> （KV 用 `-ctk/-ctv q8_0`，未用 TurboQuant，也未开 `--mlock`——32GB 下不必要）。
-
-**阶段二（b8600，最终定稿）**：
-
-| 阶段 | 速度 |
-|------|------|
-| 纯 CPU（主线 b10301） | 10.3 t/s |
-| b8600 GPU offload | 17.76 t/s |
-| + KV q8_0 / 128K | 16.14 t/s |
-| + `-fit off` / 192K | 18.03 t/s |
-| + 进程优先级 High | 18.0 t/s（+9%） |
-| + High Performance 电源 | prefill 9.67 → 28.33 t/s |
-
-**18 t/s = Q4 在 DDR4-2666 双通道的物理极限**：
-每 token 从内存读 ~1.69GB（3B 激活 × 0.563B），18 t/s = 30.4 GB/s，吃到带宽 90%+。
-**128K 与 192K 速度完全相同**（KV 在 GPU，不占 CPU 带宽瓶颈），故定稿 192K。
-
----
-
-## 验证过的死路（避免重复踩坑）
-
-| 尝试 | 结果 |
-|------|------|
-| 杀掉多余进程 | 速度不变（不是进程竞争） |
-| `--no-kv-offload`（KV 放 CPU） | 11.25 t/s，大降 |
-| `-ncmoe` / `-ot` 部分专家 GPU | 15GB pinned 卡死 / override 无效 |
-| ngram 投机解码 | GDN 架构不支持 partial sequence removal |
-| `-fa off`（关 Flash Attention） | 启动失败：`V cache quantization requires flash_attn`，与 `-ctv q8_0` 冲突 |
-| 主线 b10301 | 无法 offload qwen35moe |
-| Turbo Boost 软件开启 | BIOS 锁定，MaxClockSpeed 2208，需进 BIOS（预期 <1 t/s，带宽已饱和） |
-
----
-
-## 接入与工作流：NAS 前端调用本地模型
-
-laptop 的 llama-server 只提供 OpenAI 兼容端点（`/v1/chat/completions`），而 Claude CLI
-走 Anthropic 格式（`/v1/messages`）。`claude-web/` 内是 NAS 值守前端（9025 端口）及其
-经 litellm 的接入配置，构成完整链路：
-
-```
-前端(9025) → Claude CLI --model openai/ornith-1.0-35b-Q4_K_M.gguf
-           → litellm(:4025 /v1/messages)
-           → laptop Ornith(:8080 /v1/chat/completions)
+```mermaid
+flowchart LR
+    Browser[浏览器客户端] -->|SSE 流式交互| Web[Flask Web 服务]
+    Web --> CLI[Claude CLI]
+    CLI -->|Anthropic Messages| Adapter[LiteLLM 协议转换]
+    Adapter -->|OpenAI Chat Completions| Runtime[llama.cpp 推理服务]
+    Runtime --> CPU[CPU / 系统内存：MoE 专家层]
+    Runtime --> GPU[GPU / 显存：非专家层与量化 KV Cache]
+    Scripts[Python / SSH 部署与诊断脚本] -.->|启动 / 日志 / 就绪检查| Runtime
 ```
 
-- `claude-web/claude_web_server.py` + `index.html` — 9025 前端（SSE 流式、Provider 多后端）
-- `claude-web/providers.json` — Provider 配置表（deepseek 云端 / ornith 本地）
-- `claude-web/configs/litellm.service` — litellm 协议转换代理 systemd unit
+推理节点与 Web 接入节点可以分别部署。Web 层的多后端能力通过配置选择实现；本项目展示的是单机推理与跨主机接入实践。
 
-### litellm 代理部署（NAS，一次性）
+## 技术栈
 
-```bash
-python3 -m venv /opt/bots/litellm-venv
-/opt/bots/litellm-venv/bin/pip install "litellm[proxy]"
-/opt/bots/litellm-venv/bin/pip install "fastapi<0.116"   # 兼容 litellm 1.96
-```
+| 方向 | 使用的技术 |
+| --- | --- |
+| 模型推理 | llama.cpp、GGUF、MoE、Q4_K_M 权重量化 |
+| 资源优化 | CPU/GPU 卸载配置、KV Cache q8_0 量化、Flash Attention |
+| 服务接入 | OpenAI 兼容 API、LiteLLM、Anthropic Messages、Claude CLI |
+| 应用与流式通信 | Python、Flask、SSE、HTML / CSS / JavaScript |
+| 部署与诊断 | SSH / Paramiko、PowerShell、systemd 配置示例、nvidia-smi、运行时日志 |
 
-安装 `claude-web/configs/litellm.service` 后 `systemctl enable --now litellm`。
+## 代码与技术材料
 
-### 接入要点
+| 入口 | 内容 |
+| --- | --- |
+| [部署与性能实验说明](docs/deployment.md) | 硬件环境、已验证配置、实验结果与适用边界 |
+| [远程启动脚本](scripts/start_ornith.py) | 启动推理进程、检查加载日志与服务就绪状态 |
+| [推理测速与资源采样](scripts/quick_speed.py) | 发送样例请求，读取生成 timing、显存和内存信息 |
+| [环境与性能诊断](scripts/diag_perf.py) | 电源计划、内存频率与进程状态检查 |
+| [Web 服务接入说明](claude-web/README.md) | 流式客户端、后端配置与本地模型协议转换 |
+| [Web 后端实现](claude-web/claude_web_server.py) | CLI 子进程管理、SSE 转发、会话接口与停止生成 |
 
-- **Ornith 是推理模型**：回复前长思考（`reasoning_content`），`max_tokens` 需足够大才有正文（实测 60 全花思考、200 才有正文）
-- `~/.claude/settings.json` 的 `ANTHROPIC_*` env 会覆盖 providers.json 注入的进程 env，接入本地模型前需移除，让 providers.json 完全控制
-- 前端刷新后配置下拉可选「配置2 - Ornith本地」，即 laptop 模型
+公开脚本使用连接信息占位符，部署时需要配置自己的目标环境。模型权重和私人运行配置不随仓库分发。历史脚本以单次部署和诊断为主，使用前应核对目标路径及运行时版本。
 
----
+## 后续工程方向
 
-## 目录结构
+- 将历史脚本中的部署参数统一为配置入口，减少环境相关的手工修改。
+- 补充固定输入长度、输出长度和重复次数的基准测试，记录 TTFT、生成速度及资源占用。
+- 在当前服务链路上进一步验证并发请求、超时恢复和长时间运行行为。
 
-- `scripts/` — 全部调试脚本（SSH 连接、下载、部署、测速、诊断、一键启动）
-- `scripts/start_ornith.py` — 一键启动（推荐入口）
-- `claude-web/` — NAS 9025 前端接入（claude_web_server.py / index.html / providers.json / litellm.service）
-- `docs/调试记录.md` — 完整部署决策与结论归档
-
----
-
-## 进阶方向
-
-- **换更小量化提速**：
-  - Q3_K_M（~16.5GB）→ 预期 ~20-21 t/s
-  - IQ3_XXS（13GB）→ 预期 ~24-25 t/s，还省 6-7GB 内存给 KV
-- 更强硬件（RTX 系列 / DDR5 / PCIe Gen4）直接线性获益，该配置思路不变
-- 在相同 GTX1060 上测试 D-Flash 草稿器配合 27B dense 模型，探索突破 25 t/s
-- 上 20 t/s 探索定论（2026-08-14）：FA 对照 / 线程 / `--mlock` 均无提升（DDR4 带宽天花板 18 t/s 已达 90%+）；
-- 投机解码（MTP / LLM draft / ngram）因 qwen35moe 架构不支持 speculative decoding 而不可行（b8600 无 `--mtp`，唯一同词表 draft Ornith-9B 实测被禁用）。
+这些属于后续扩展方向；当前展示的成果以仓库已有实现和历史实验记录为依据。
